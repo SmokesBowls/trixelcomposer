@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
-#!/usr/bin/env python3
 # Terminal-Based Trixel Composer: Autonomous AI Artist (No GUI Dependencies)
 # Runs immediately with just the Python 3 standard library (Pillow optional for PNG export)
 
 import os
+import sys
 import asyncio
 import json
 import time
 import random
+import importlib.util
 from pathlib import Path
 from dataclasses import dataclass, asdict
 from typing import Dict, List, Tuple
 from enum import Enum
+from typing import Dict, List, Optional, Tuple
 
 # --- Configuration ---
 CANVAS_WIDTH = 16
@@ -23,6 +25,87 @@ class CreativePhase(Enum):
     ACTIVE_CREATION = "active_creation"
     REFLECTION = "reflection"
     STYLE_DEVELOPMENT = "style_development"
+
+
+class ZWArtIntentManager:
+    """Lightweight ZW art intent loader → Ollama prompt → runtime influence."""
+
+    def __init__(self, intent_path: Path = Path(".zw/art.intent")):
+        self.intent_path = Path(intent_path)
+        self.intent: Dict[str, str] = {}
+        self.ollama_prompt: str = ""
+        self.palette_colors: Optional[List[Tuple[int, int, int]]] = None
+        self._load_intent()
+
+    def _load_intent(self):
+        raw_block = None
+
+        if self.intent_path.exists():
+            raw_block = self.intent_path.read_text()
+        elif os.environ.get("ZW_ART_INTENT"):
+            raw_block = os.environ["ZW_ART_INTENT"]
+
+        if not raw_block:
+            return
+
+        parsed = self.parse_block(raw_block)
+        if not parsed:
+            print("⚠️ Could not parse ZW art intent; continuing autonomously.")
+            return
+
+        self.intent = parsed
+        self.ollama_prompt = self._build_ollama_prompt(parsed)
+        self.palette_colors = self._resolve_palette(parsed.get("palette"))
+
+        print("🧱 Loaded ZW art intent → Ollama prompt ready:")
+        print(f"    theme: {parsed.get('theme', 'unspecified')}")
+        if parsed.get("palette"):
+            print(f"    palette: {parsed['palette']}")
+
+    def parse_block(self, block: str) -> Dict[str, str]:
+        # Trim any leading protocol markers
+        if "!zw/art.intent" in block:
+            block = block.split("!zw/art.intent", 1)[-1]
+
+        # Extract key: value pairs (very small YAML/JSON subset)
+        intent: Dict[str, str] = {}
+        for line in block.splitlines():
+            line = line.strip().strip("{}")
+            if not line or line.startswith("!"):
+                continue
+            if ":" not in line:
+                continue
+            key, value = line.split(":", 1)
+            key = key.strip().strip("\"'")
+            value = value.strip().strip(",")
+            value = value.strip().strip("\"'")
+            if key:
+                intent[key] = value
+
+        return intent
+
+    def _build_ollama_prompt(self, intent: Dict[str, str]) -> str:
+        theme = intent.get("theme", "unknown theme")
+        palette = intent.get("palette", "custom")
+        density = intent.get("density", "balanced")
+        style = intent.get("style", "adaptive")
+        return (
+            "You are a pixel artist collaborating with a Trixel canvas. "
+            f"Paint a scene matching the theme '{theme}' in the '{palette}' palette. "
+            f"Keep stroke density {density} and push toward a {style} aesthetic."
+        )
+
+    def _resolve_palette(self, palette_name: Optional[str]) -> Optional[List[Tuple[int, int, int]]]:
+        if not palette_name:
+            return None
+
+        palette_library = {
+            "obsidian_fire": [(255, 69, 0), (255, 140, 0), (139, 0, 0)],
+            "aurora_glow": [(72, 209, 204), (123, 104, 238), (255, 250, 205)],
+            "fractaline": [(199, 21, 133), (65, 105, 225), (32, 178, 170)],
+            "verdant_realm": [(46, 139, 87), (107, 142, 35), (189, 183, 107)],
+        }
+        return palette_library.get(palette_name.lower())
 
 @dataclass
 class CreativeAction:
@@ -230,6 +313,73 @@ class TerminalTrixelComposer:
             'reflection': [(100, 149, 237), (123, 104, 238), (147, 112, 219)],
             'style': [(255, 20, 147), (255, 105, 180), (255, 182, 193)]
         }
+
+        if self.intent_manager.palette_colors:
+            self.phase_colors['planning'] = self.intent_manager.palette_colors
+            self.phase_colors['active'] = self.intent_manager.palette_colors
+            self.phase_colors['reflection'] = self.intent_manager.palette_colors
+            self.phase_colors['style'] = self.intent_manager.palette_colors
+
+    def _safe_input(self, prompt: str) -> str:
+        if not sys.stdin.isatty():
+            print("⚠️ Non-interactive mode detected; using default Ollama selection.")
+            return ""
+        try:
+            return input(prompt)
+        except EOFError:
+            return ""
+
+    def _configure_ollama_model(self):
+        if not OLLAMA_AVAILABLE:
+            print("⚠️ Ollama not installed; running without LLM guidance.")
+            return
+
+        available_models: List[str] = []
+        try:
+            response = ollama.list()
+            available_models = [m.get("name") for m in response.get("models", []) if m.get("name")]
+        except Exception as e:
+            print(f"⚠️ Could not list Ollama models: {e}")
+
+        if available_models:
+            print("🤖 Available Ollama models detected on this machine:")
+            for idx, name in enumerate(available_models, start=1):
+                print(f"   {idx}. {name}")
+
+            choice = self._safe_input("Select an Ollama model (press Enter for default 1, or 0 to skip): ").strip()
+
+            if choice == "0":
+                print("🚫 Ollama guidance disabled by user choice.")
+                return
+
+            if choice.isdigit():
+                idx = int(choice)
+                if 1 <= idx <= len(available_models):
+                    self.ollama_model = available_models[idx - 1]
+            if not self.ollama_model:
+                self.ollama_model = available_models[0]
+        else:
+            manual = self._safe_input("Enter an Ollama model to use (leave blank to skip): ").strip()
+            if manual:
+                self.ollama_model = manual
+
+        if self.ollama_model:
+            print(f"🧠 Ollama guidance enabled with model: {self.ollama_model}")
+        else:
+            print("⚙️ Continuing without Ollama-driven planning.")
+
+    def ollama_brain(self, prompt: str) -> Optional[str]:
+        if not (self.ollama_model and OLLAMA_AVAILABLE):
+            return None
+        try:
+            response = ollama.chat(
+                model=self.ollama_model,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            return response.get("message", {}).get("content")
+        except Exception as e:
+            print(f"⚠️ Ollama error: {e}")
+            return None
         
     def perceive(self):
         """Analyze current canvas state"""
@@ -291,14 +441,44 @@ class TerminalTrixelComposer:
         
         colors = self.phase_colors[phase_key]
         color = colors[random.randint(0, len(colors) - 1)]
-        
+
+        # Optional Ollama-driven guidance overlays tool/color choices
+        ollama_notes = ""
+        if self.intent_manager and self.intent_manager.ollama_prompt:
+            ollama_context = self.intent_manager.ollama_prompt
+        else:
+            ollama_context = ""
+
+        ollama_prompt = (
+            f"Canvas stats: {stats}\n"
+            f"Memory: {memory}\n"
+            f"Phase: {self.creative_phase.value}\n"
+            f"ZW intent: {ollama_context or 'none'}\n\n"
+            "Respond ONLY as JSON with keys tool and color, e.g. "
+            "{\"tool\": \"brush\", \"color\": [r,g,b]}"
+        )
+
+        brain = self.ollama_brain(ollama_prompt)
+        if brain:
+            try:
+                data = json.loads(brain)
+                tool = data.get("tool", tool)
+                color_data = data.get("color", color)
+                if isinstance(color_data, (list, tuple)) and len(color_data) == 3:
+                    color = tuple(int(c) for c in color_data)
+                ollama_notes = "ollama_guided"
+            except Exception:
+                ollama_notes = "ollama_parse_failed"
+
         return CreativeAction(
             tool=tool,
             x=x,
             y=y,
             color=color,
             pressure=random.uniform(0.5, 1.0),
-            reasoning=f"{self.creative_phase.value}_action",
+            reasoning=f"{self.creative_phase.value}_action"
+            + (f"_{intent_theme}" if intent_theme else "")
+            + (f"_{ollama_notes}" if ollama_notes else ""),
             timestamp=time.time()
         )
         
@@ -404,11 +584,18 @@ class TerminalTrixelComposer:
             print(f"      {tool}: {mastery}")
             
         print(f"\n🎨 Final Artistic Phase: {self.creative_phase.value}")
-        
+        if self.ollama_model:
+            print(f"🤖 Ollama model: {self.ollama_model}")
+        if self.intent_manager.intent:
+            print("\n🧱 ZW Art Intent ➜ Ollama prompt:")
+            print(f"   Theme: {self.intent_manager.intent.get('theme', 'unspecified')}")
+            if self.intent_manager.ollama_prompt:
+                print(f"   Prompt: {self.intent_manager.ollama_prompt}")
+
         # Save session
         self.save_session()
         print(f"\n💾 Session saved to: .zw/sessions/{self.session_id}.json")
-        
+
     def save_session(self):
         """Save session data with proper type conversion"""
 
