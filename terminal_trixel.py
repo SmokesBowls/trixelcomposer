@@ -11,14 +11,9 @@ import random
 import importlib.util
 from pathlib import Path
 from dataclasses import dataclass, asdict
+from typing import Dict, List, Tuple
 from enum import Enum
 from typing import Dict, List, Optional, Tuple
-
-OLLAMA_AVAILABLE = importlib.util.find_spec("ollama") is not None
-if OLLAMA_AVAILABLE:
-    import ollama
-else:
-    ollama = None
 
 # --- Configuration ---
 CANVAS_WIDTH = 16
@@ -243,23 +238,7 @@ class AutonomousCreativeMemory:
             'total_experiences': self.total_experiences,
         }
 
-    def save(self, path: Path):
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w") as f:
-            json.dump(self.serialize(), f, indent=2)
-
     def load(self, data: Dict):
-        if isinstance(data, (str, Path)):
-            path = Path(data)
-            if not path.exists():
-                return
-            with open(path, "r") as f:
-                data = json.load(f)
-
-        if not isinstance(data, dict):
-            return
-
         self.short_term = data.get('short_term', [])
         self.tool_preferences = data.get('tool_preferences', {})
         self.style_evolution = data.get('style_evolution', [])
@@ -315,11 +294,8 @@ class TerminalTrixelComposer:
         self.session_id = f"terminal_{int(time.time())}"
         self.snapshot_manager = SnapshotManager(Path(".zw/snapshots.json"))
         self.memory_path = Path(".zw/memory.json")
-        self.intent_manager = ZWArtIntentManager()
-        self.ollama_model: Optional[str] = None
 
         self._load_memory()
-        self._configure_ollama_model()
 
         # Restore the latest snapshot if available
         latest_canvas = self.snapshot_manager.latest_snapshot()
@@ -431,16 +407,15 @@ class TerminalTrixelComposer:
         """Plan next creative action based on phase and memory"""
         stats = perception['canvas_stats']
         memory = perception['memory_state']
-        intent_theme = self.intent_manager.intent.get('theme') if self.intent_manager else None
 
         # Choose location
         if self.creative_phase == CreativePhase.PLANNING:
+            # Start near center
+            x = CANVAS_WIDTH // 2 + random.randint(-2, 2)
+            y = CANVAS_HEIGHT // 2 + random.randint(-2, 2)
             if random.random() < 0.25:
                 x = random.randint(0, CANVAS_WIDTH - 1)
                 y = random.randint(0, CANVAS_HEIGHT - 1)
-            else:
-                x = CANVAS_WIDTH // 2 + random.randint(-2, 2)
-                y = CANVAS_HEIGHT // 2 + random.randint(-2, 2)
         else:
             # Random exploration with some bias toward existing work
             if stats['completion'] > 0.3:
@@ -533,23 +508,17 @@ class TerminalTrixelComposer:
         
     def update_phase(self, perception):
         """Update creative phase based on progress"""
-        comp = perception['canvas_stats']['completion']
-        exp = perception['memory_state']['experiences']
+        completion = perception['canvas_stats']['completion']
+        experiences = max(len(self.memory.short_term), getattr(self.memory, 'total_experiences', 0))
 
-        # Enter ACTIVE once it has ANY meaningful mark or memory
-        if self.creative_phase == CreativePhase.PLANNING:
-            if comp > 0.05 or exp >= 5:
-                self.creative_phase = CreativePhase.ACTIVE_CREATION
-
-        # Enter REFLECTION once coverage expands or actions diversify
-        elif self.creative_phase == CreativePhase.ACTIVE_CREATION:
-            if comp > 0.20 or exp >= 15:
-                self.creative_phase = CreativePhase.REFLECTION
-
-        # STYLE after several cycles
-        elif self.creative_phase == CreativePhase.REFLECTION:
-            if exp >= 25:
-                self.creative_phase = CreativePhase.STYLE_DEVELOPMENT
+        if self.creative_phase == CreativePhase.PLANNING and (
+            completion > 0.08 or experiences >= 5
+        ):
+            self.creative_phase = CreativePhase.ACTIVE_CREATION
+        elif self.creative_phase == CreativePhase.ACTIVE_CREATION and completion >= 0.6:
+            self.creative_phase = CreativePhase.REFLECTION
+        elif self.creative_phase == CreativePhase.REFLECTION and completion >= 0.8:
+            self.creative_phase = CreativePhase.STYLE_DEVELOPMENT
             
     async def autonomous_create(self, iterations=100):
         """Main autonomous creation loop"""
@@ -644,10 +613,7 @@ class TerminalTrixelComposer:
             'final_stats': convert_types(self.canvas.get_stats()),
             'memory_summary': convert_types(self.memory.get_memory_summary()),
             'final_phase': self.creative_phase.value,
-            'experiences': convert_types(self.memory.short_term),
-            'zw_art_intent': convert_types(self.intent_manager.intent if self.intent_manager else {}),
-            'ollama_prompt': self.intent_manager.ollama_prompt if self.intent_manager else "",
-            'ollama_model': self.ollama_model,
+            'experiences': convert_types(self.memory.short_term)
         }
         
         session_dir = Path(".zw/sessions")
@@ -667,16 +633,21 @@ class TerminalTrixelComposer:
         self._save_memory()
 
     def _save_memory(self):
+        self.memory_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            self.memory.save(self.memory_path)
+            with open(self.memory_path, "w") as f:
+                json.dump(self.memory.serialize(), f, indent=2)
         except Exception as e:
             print(f"⚠️ Could not save memory: {e}")
 
     def _load_memory(self):
         if self.memory_path.exists():
             try:
-                self.memory.load(self.memory_path)
-                print("🧠 Loaded prior creative memory for continuity across sessions.")
+                with open(self.memory_path, "r") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    self.memory.load(data)
+                    print("🧠 Loaded prior creative memory for continuity across sessions.")
             except Exception as e:
                 print(f"⚠️ Could not load memory: {e}")
 
