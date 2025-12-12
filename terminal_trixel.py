@@ -10,7 +10,7 @@ import time
 import random
 from pathlib import Path
 from dataclasses import dataclass, asdict
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple
 from enum import Enum
 
 # --- Configuration ---
