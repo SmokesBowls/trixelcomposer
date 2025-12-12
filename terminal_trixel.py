@@ -93,12 +93,13 @@ class TerminalCanvas:
 
 class AutonomousCreativeMemory:
     """Simplified memory system for autonomous learning"""
-    
+
     def __init__(self):
         self.short_term = []
         self.tool_preferences = {}
         self.style_evolution = []
         self.session_learnings = []
+        self.total_experiences = 0
         
     def add_experience(self, action: CreativeAction, quality: float):
         """Add creative experience to memory"""
@@ -119,11 +120,13 @@ class AutonomousCreativeMemory:
             
         prefs = self.tool_preferences[tool]
         prefs['usage'] += 1
-        
+
         # Moving average for quality
         alpha = 0.2
         prefs['avg_quality'] = (1 - alpha) * prefs['avg_quality'] + alpha * quality
-        
+
+        self.total_experiences += 1
+
     def get_preferred_tool(self):
         """Get currently preferred tool based on success"""
         if not self.tool_preferences:
@@ -136,12 +139,28 @@ class AutonomousCreativeMemory:
     def get_memory_summary(self):
         """Get summary of current memory state"""
         return {
-            'experiences': len(self.short_term),
+            'experiences': self.total_experiences,
             'tools_learned': len(self.tool_preferences),
             'preferred_tool': self.get_preferred_tool(),
             'tool_mastery': {tool: f"{data['avg_quality']:.2f}"
                            for tool, data in self.tool_preferences.items()}
         }
+
+    def serialize(self):
+        return {
+            'short_term': self.short_term,
+            'tool_preferences': self.tool_preferences,
+            'style_evolution': self.style_evolution,
+            'session_learnings': self.session_learnings,
+            'total_experiences': self.total_experiences,
+        }
+
+    def load(self, data: Dict):
+        self.short_term = data.get('short_term', [])
+        self.tool_preferences = data.get('tool_preferences', {})
+        self.style_evolution = data.get('style_evolution', [])
+        self.session_learnings = data.get('session_learnings', [])
+        self.total_experiences = data.get('total_experiences', len(self.short_term))
 
 
 class SnapshotManager:
@@ -184,19 +203,23 @@ class SnapshotManager:
 
 class TerminalTrixelComposer:
     """Terminal-based autonomous AI artist"""
-    
+
     def __init__(self):
         self.canvas = TerminalCanvas()
         self.memory = AutonomousCreativeMemory()
         self.creative_phase = CreativePhase.PLANNING
         self.session_id = f"terminal_{int(time.time())}"
         self.snapshot_manager = SnapshotManager(Path(".zw/snapshots.json"))
+        self.memory_path = Path(".zw/memory.json")
+
+        self._load_memory()
 
         # Restore the latest snapshot if available
         latest_canvas = self.snapshot_manager.latest_snapshot()
         if latest_canvas:
             self.canvas.canvas = latest_canvas
             print(f"📸 Loaded {len(self.snapshot_manager.snapshots)} canvas snapshots; resuming from latest state.")
+            self.creative_phase = CreativePhase.ACTIVE_CREATION
         else:
             print("📸 No existing snapshots found; starting a fresh canvas.")
         
@@ -234,17 +257,20 @@ class TerminalTrixelComposer:
         """Plan next creative action based on phase and memory"""
         stats = perception['canvas_stats']
         memory = perception['memory_state']
-        
+
         # Choose location
         if self.creative_phase == CreativePhase.PLANNING:
             # Start near center
             x = CANVAS_WIDTH // 2 + random.randint(-2, 2)
             y = CANVAS_HEIGHT // 2 + random.randint(-2, 2)
+            if random.random() < 0.25:
+                x = random.randint(0, CANVAS_WIDTH - 1)
+                y = random.randint(0, CANVAS_HEIGHT - 1)
         else:
             # Random exploration with some bias toward existing work
             if stats['completion'] > 0.3:
                 # Bias toward existing pixels
-                x = random.randint(max(0, CANVAS_WIDTH//2 - 4), 
+                x = random.randint(max(0, CANVAS_WIDTH//2 - 4),
                                  min(CANVAS_WIDTH-1, CANVAS_WIDTH//2 + 4))
                 y = random.randint(max(0, CANVAS_HEIGHT//2 - 4), 
                                  min(CANVAS_HEIGHT-1, CANVAS_HEIGHT//2 + 4))
@@ -303,15 +329,15 @@ class TerminalTrixelComposer:
     def update_phase(self, perception):
         """Update creative phase based on progress"""
         completion = perception['canvas_stats']['completion']
-        experiences = len(self.memory.short_term)
-        
-        if completion < 0.2:
-            self.creative_phase = CreativePhase.PLANNING
-        elif completion < 0.6:
+        experiences = max(len(self.memory.short_term), getattr(self.memory, 'total_experiences', 0))
+
+        if self.creative_phase == CreativePhase.PLANNING and (
+            completion > 0.08 or experiences >= 5
+        ):
             self.creative_phase = CreativePhase.ACTIVE_CREATION
-        elif completion < 0.8:
+        elif self.creative_phase == CreativePhase.ACTIVE_CREATION and completion >= 0.6:
             self.creative_phase = CreativePhase.REFLECTION
-        else:
+        elif self.creative_phase == CreativePhase.REFLECTION and completion >= 0.8:
             self.creative_phase = CreativePhase.STYLE_DEVELOPMENT
             
     async def autonomous_create(self, iterations=100):
@@ -415,6 +441,28 @@ class TerminalTrixelComposer:
 
         # Save rolling snapshots to disk for continuity across runs
         self.snapshot_manager.record_snapshot(self.canvas.canvas)
+
+        # Persist memory for cross-session learning
+        self._save_memory()
+
+    def _save_memory(self):
+        self.memory_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(self.memory_path, "w") as f:
+                json.dump(self.memory.serialize(), f, indent=2)
+        except Exception as e:
+            print(f"⚠️ Could not save memory: {e}")
+
+    def _load_memory(self):
+        if self.memory_path.exists():
+            try:
+                with open(self.memory_path, "r") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    self.memory.load(data)
+                    print("🧠 Loaded prior creative memory for continuity across sessions.")
+            except Exception as e:
+                print(f"⚠️ Could not load memory: {e}")
 
 async def main():
     """Main entry point"""
