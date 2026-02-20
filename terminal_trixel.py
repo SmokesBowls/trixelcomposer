@@ -478,6 +478,10 @@ class TerminalTrixelComposer:
             except Exception:
                 ollama_notes = "ollama_parse_failed"
 
+        intent_theme = ""
+        if self.intent_manager and self.intent_manager.intent:
+            intent_theme = self.intent_manager.intent.get("theme", "").strip().replace(" ", "_")
+
         return CreativeAction(
             tool=tool,
             x=x,
