@@ -5,6 +5,7 @@
 import os
 import sys
 import asyncio
+import argparse
 import json
 import time
 import random
@@ -19,6 +20,25 @@ from typing import Dict, List, Optional, Tuple
 CANVAS_WIDTH = 16
 CANVAS_HEIGHT = 16
 ZW_SESSION_PATH = ".zw/trixel.session"
+
+OLLAMA_AVAILABLE = False
+LMDB_AVAILABLE = False
+ollama = None
+lmdb = None
+
+try:
+    OLLAMA_AVAILABLE = importlib.util.find_spec("ollama") is not None
+except Exception:
+    OLLAMA_AVAILABLE = False
+if OLLAMA_AVAILABLE:
+    import ollama
+
+try:
+    LMDB_AVAILABLE = importlib.util.find_spec("lmdb") is not None
+except Exception:
+    LMDB_AVAILABLE = False
+if LMDB_AVAILABLE:
+    import lmdb
 
 class CreativePhase(Enum):
     PLANNING = "planning"
@@ -284,6 +304,78 @@ class SnapshotManager:
         except Exception as e:
             print(f"⚠️ Could not save snapshots: {e}")
 
+class ExperienceStore:
+    """Persist action-level learning traces for replay and offline training."""
+
+    def __init__(self, base_dir: Path):
+        self.base_dir = Path(base_dir)
+        self.base_dir.mkdir(parents=True, exist_ok=True)
+        self.backend = "lmdb" if LMDB_AVAILABLE else "jsonl"
+        self.log_path = self.base_dir / "experience_log.jsonl"
+        self.counter_path = self.base_dir / "experience_counter.txt"
+        self.env = None
+
+        if self.backend == "lmdb":
+            try:
+                self.env = lmdb.open(
+                    str(self.base_dir / "experience.lmdb"),
+                    map_size=64 * 1024 * 1024,
+                    subdir=False,
+                    create=True,
+                )
+            except Exception as e:
+                print(f"⚠️ LMDB unavailable at runtime ({e}); falling back to JSONL event log.")
+                self.backend = "jsonl"
+
+    def _next_id(self) -> int:
+        last = 0
+        if self.counter_path.exists():
+            try:
+                last = int(self.counter_path.read_text().strip() or "0")
+            except Exception:
+                last = 0
+        current = last + 1
+        self.counter_path.write_text(str(current))
+        return current
+
+    def _serialize(self, event: Dict) -> bytes:
+        return json.dumps(event, separators=(",", ":")).encode("utf-8")
+
+    def record(
+        self,
+        session_id: str,
+        iteration: int,
+        phase: str,
+        action: CreativeAction,
+        quality: float,
+        canvas_stats: Dict,
+    ) -> None:
+        event_id = self._next_id()
+        event = {
+            "id": event_id,
+            "session_id": session_id,
+            "iteration": iteration,
+            "phase": phase,
+            "quality": quality,
+            "action": asdict(action),
+            "canvas_stats": canvas_stats,
+            "recorded_at": time.time(),
+        }
+
+        if self.backend == "lmdb" and self.env is not None:
+            try:
+                with self.env.begin(write=True) as txn:
+                    txn.put(f"event:{event_id:09d}".encode("utf-8"), self._serialize(event))
+            except Exception as e:
+                print(f"⚠️ LMDB write failed ({e}); writing event to JSONL fallback.")
+                with open(self.log_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(event) + "\n")
+            return
+
+        with open(self.log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(event) + "\n")
+
+
 class TerminalTrixelComposer:
     """Terminal-based autonomous AI artist"""
 
@@ -292,8 +384,12 @@ class TerminalTrixelComposer:
         self.memory = AutonomousCreativeMemory()
         self.creative_phase = CreativePhase.PLANNING
         self.session_id = f"terminal_{int(time.time())}"
+        self.intent_manager = ZWArtIntentManager()
+        self.ollama_model: Optional[str] = None
         self.snapshot_manager = SnapshotManager(Path(".zw/snapshots.json"))
         self.memory_path = Path(".zw/memory.json")
+        self.experience_store = ExperienceStore(Path(".zw"))
+        self.keystroke_log_path = Path(".zw/keystrokes.jsonl")
 
         self._load_memory()
 
@@ -305,6 +401,8 @@ class TerminalTrixelComposer:
             self.creative_phase = CreativePhase.ACTIVE_CREATION
         else:
             print("📸 No existing snapshots found; starting a fresh canvas.")
+
+        print(f"🗂️ Experience store backend: {self.experience_store.backend}")
         
         # Color palettes for different phases
         self.phase_colors = {
@@ -320,12 +418,28 @@ class TerminalTrixelComposer:
             self.phase_colors['reflection'] = self.intent_manager.palette_colors
             self.phase_colors['style'] = self.intent_manager.palette_colors
 
+        self._configure_ollama_model()
+
+    def _record_keystroke(self, prompt: str, value: str):
+        event = {
+            "session_id": self.session_id,
+            "prompt": prompt,
+            "value": value,
+            "length": len(value),
+            "timestamp": time.time(),
+        }
+        self.keystroke_log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.keystroke_log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(event) + "\n")
+
     def _safe_input(self, prompt: str) -> str:
         if not sys.stdin.isatty():
             print("⚠️ Non-interactive mode detected; using default Ollama selection.")
             return ""
         try:
-            return input(prompt)
+            value = input(prompt)
+            self._record_keystroke(prompt, value)
+            return value
         except EOFError:
             return ""
 
@@ -470,6 +584,10 @@ class TerminalTrixelComposer:
             except Exception:
                 ollama_notes = "ollama_parse_failed"
 
+        intent_theme = ""
+        if self.intent_manager and self.intent_manager.intent:
+            intent_theme = self.intent_manager.intent.get("theme", "").strip().replace(" ", "_")
+
         return CreativeAction(
             tool=tool,
             x=x,
@@ -542,7 +660,15 @@ class TerminalTrixelComposer:
             
             # 5. Learn from experience
             self.memory.add_experience(action, quality)
-            
+            self.experience_store.record(
+                session_id=self.session_id,
+                iteration=i + 1,
+                phase=self.creative_phase.value,
+                action=action,
+                quality=quality,
+                canvas_stats=self.canvas.get_stats(),
+            )
+
             # 6. Display progress
             print(f"🧠 Phase: {self.creative_phase.value}")
             print(f"🎨 Action: {action.tool} at ({action.x},{action.y}) - Quality: {quality:.2f}")
@@ -562,6 +688,72 @@ class TerminalTrixelComposer:
         # Final session summary
         await self.session_summary()
         
+    async def replay_experience_jsonl(
+        self,
+        jsonl_path: Path,
+        delay: float = 0.15,
+        clear_canvas: bool = True,
+        max_events: Optional[int] = None,
+    ):
+        """Replay stroke events from a JSONL log onto the canvas."""
+        path = Path(jsonl_path)
+        if not path.exists():
+            raise FileNotFoundError(f"Replay file not found: {path}")
+
+        if clear_canvas:
+            self.canvas = TerminalCanvas(width=CANVAS_WIDTH, height=CANVAS_HEIGHT)
+            print("🧼 Cleared canvas for replay.")
+
+        print(f"🎬 Replaying strokes from: {path}")
+        applied = 0
+        skipped = 0
+
+        with open(path, "r", encoding="utf-8") as f:
+            for line_no, line in enumerate(f, start=1):
+                if not line.strip():
+                    continue
+
+                try:
+                    payload = json.loads(line)
+                except json.JSONDecodeError:
+                    skipped += 1
+                    continue
+
+                action_data = payload.get("action", payload)
+                x = action_data.get("x")
+                y = action_data.get("y")
+                color = action_data.get("color")
+
+                if not (isinstance(x, int) and isinstance(y, int)):
+                    skipped += 1
+                    continue
+                if not (isinstance(color, (list, tuple)) and len(color) == 3):
+                    skipped += 1
+                    continue
+
+                color_tuple = tuple(int(c) for c in color)
+                self.canvas.set_pixel(x, y, color_tuple)
+                applied += 1
+
+                quality = payload.get("quality")
+                quality_text = f"{float(quality):.2f}" if isinstance(quality, (int, float)) else "n/a"
+                print(
+                    f"🎞️ Replay {applied}: line {line_no} -> ({x},{y}) color={color_tuple} quality={quality_text}"
+                )
+                self.canvas.display()
+
+                if delay > 0:
+                    await asyncio.sleep(delay)
+
+                if max_events is not None and applied >= max_events:
+                    break
+
+        stats = self.canvas.get_stats()
+        print(
+            f"✅ Replay complete: applied={applied}, skipped={skipped}, "
+            f"completion={stats['completion']:.1%}, colors={stats['colors_used']}"
+        )
+
     async def session_summary(self):
         """Display final session summary"""
         perception = self.perceive()
@@ -613,7 +805,10 @@ class TerminalTrixelComposer:
             'final_stats': convert_types(self.canvas.get_stats()),
             'memory_summary': convert_types(self.memory.get_memory_summary()),
             'final_phase': self.creative_phase.value,
-            'experiences': convert_types(self.memory.short_term)
+            'experiences': convert_types(self.memory.short_term),
+            'experience_store_backend': self.experience_store.backend,
+            'experience_log_path': str(self.experience_store.log_path),
+            'keystroke_log_path': str(self.keystroke_log_path),
         }
         
         session_dir = Path(".zw/sessions")
@@ -651,23 +846,37 @@ class TerminalTrixelComposer:
             except Exception as e:
                 print(f"⚠️ Could not load memory: {e}")
 
-async def main():
+async def main(
+    replay_jsonl: Optional[str] = None,
+    replay_delay: float = 0.15,
+    replay_limit: Optional[int] = None,
+    clear_replay_canvas: bool = True,
+):
     """Main entry point"""
     print("🎨 TRIXEL COMPOSER: AUTONOMOUS AI ARTIST")
     print("=" * 50)
     print("🚀 Initializing autonomous creative intelligence...")
-    
+
     composer = TerminalTrixelComposer()
-    
-    # Show initial empty canvas
+
+    # Show initial canvas
     composer.canvas.display()
-    
+
+    if replay_jsonl:
+        await composer.replay_experience_jsonl(
+            jsonl_path=Path(replay_jsonl),
+            delay=max(0.0, replay_delay),
+            clear_canvas=clear_replay_canvas,
+            max_events=replay_limit,
+        )
+        return
+
     print("\n⏳ Starting autonomous creation in 3 seconds...")
     await asyncio.sleep(3)
-    
+
     # Begin autonomous creation
     await composer.autonomous_create(30)
-    
+
     print("\n✨ Autonomous AI artist session complete!")
     print("🎯 Check .zw/sessions/ folder for saved session data")
 
@@ -735,8 +944,22 @@ def apply_png_patch():
 apply_png_patch()
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Terminal Trixel Composer")
+    parser.add_argument("--replay-jsonl", help="Replay strokes from a JSONL file")
+    parser.add_argument("--replay-delay", type=float, default=0.15, help="Delay between replayed strokes (seconds)")
+    parser.add_argument("--replay-limit", type=int, default=None, help="Optional max number of replay events")
+    parser.add_argument("--no-clear-replay-canvas", action="store_true", help="Do not clear the current canvas before replay")
+    args = parser.parse_args()
+
     try:
-        asyncio.run(main())
+        asyncio.run(
+            main(
+                replay_jsonl=args.replay_jsonl,
+                replay_delay=args.replay_delay,
+                replay_limit=args.replay_limit,
+                clear_replay_canvas=not args.no_clear_replay_canvas,
+            )
+        )
     except KeyboardInterrupt:
         print("\n\n🛑 Session interrupted by user")
     except Exception as e:
