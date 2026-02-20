@@ -20,9 +20,24 @@ CANVAS_WIDTH = 16
 CANVAS_HEIGHT = 16
 ZW_SESSION_PATH = ".zw/trixel.session"
 
-OLLAMA_AVAILABLE = importlib.util.find_spec("ollama") is not None
+OLLAMA_AVAILABLE = False
+LMDB_AVAILABLE = False
+ollama = None
+lmdb = None
+
+try:
+    OLLAMA_AVAILABLE = importlib.util.find_spec("ollama") is not None
+except Exception:
+    OLLAMA_AVAILABLE = False
 if OLLAMA_AVAILABLE:
     import ollama
+
+try:
+    LMDB_AVAILABLE = importlib.util.find_spec("lmdb") is not None
+except Exception:
+    LMDB_AVAILABLE = False
+if LMDB_AVAILABLE:
+    import lmdb
 
 class CreativePhase(Enum):
     PLANNING = "planning"
@@ -403,6 +418,18 @@ class TerminalTrixelComposer:
             self.phase_colors['style'] = self.intent_manager.palette_colors
 
         self._configure_ollama_model()
+
+    def _record_keystroke(self, prompt: str, value: str):
+        event = {
+            "session_id": self.session_id,
+            "prompt": prompt,
+            "value": value,
+            "length": len(value),
+            "timestamp": time.time(),
+        }
+        self.keystroke_log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.keystroke_log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(event) + "\n")
 
     def _safe_input(self, prompt: str) -> str:
         if not sys.stdin.isatty():
