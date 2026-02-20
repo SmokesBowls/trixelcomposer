@@ -24,10 +24,6 @@ OLLAMA_AVAILABLE = importlib.util.find_spec("ollama") is not None
 if OLLAMA_AVAILABLE:
     import ollama
 
-LMDB_AVAILABLE = importlib.util.find_spec("lmdb") is not None
-if LMDB_AVAILABLE:
-    import lmdb
-
 class CreativePhase(Enum):
     PLANNING = "planning"
     ACTIVE_CREATION = "active_creation"
@@ -407,18 +403,6 @@ class TerminalTrixelComposer:
             self.phase_colors['style'] = self.intent_manager.palette_colors
 
         self._configure_ollama_model()
-
-    def _record_keystroke(self, prompt: str, value: str):
-        event = {
-            "session_id": self.session_id,
-            "prompt": prompt,
-            "value": value,
-            "length": len(value),
-            "timestamp": time.time(),
-        }
-        self.keystroke_log_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.keystroke_log_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(event) + "\n")
 
     def _safe_input(self, prompt: str) -> str:
         if not sys.stdin.isatty():
