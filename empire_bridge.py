@@ -1,10 +1,14 @@
 # Empire Bridge: Connect TrixelComposer to TraeAgent via ZW Protocol
 
 import asyncio
-import aiohttp
+import importlib.util
 import json
 from pathlib import Path
 import time
+
+AIOHTTP_AVAILABLE = importlib.util.find_spec("aiohttp") is not None
+if AIOHTTP_AVAILABLE:
+    import aiohttp
 
 class EmpireBridge:
     def __init__(self, composer, zw_broker_url="http://localhost:5010"):
@@ -15,6 +19,9 @@ class EmpireBridge:
         
     async def send_to_empire(self, zw_message):
         """Send ZW protocol message to Empire via ZW Broker"""
+        if not AIOHTTP_AVAILABLE:
+            print("Empire communication unavailable: aiohttp is not installed.")
+            return None
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
@@ -131,28 +138,8 @@ class EmpireBridge:
         session_file.parent.mkdir(parents=True, exist_ok=True)
         session_file.write_text(json.dumps(session_data, indent=2))
 
-# Integration with main TrixelComposer
-class EnhancedTrixelComposer(TrixelComposer):
-    def __init__(self):
-        super().__init__()
-        self.empire_bridge = EmpireBridge(self)
-        
-    async def start_collaborative_session(self):
-        """Launch collaborative creation with AI Empire"""
-        await self.empire_bridge.collaborative_create()
-        
-    def enhanced_plan(self):
-        """Enhanced planning with potential AI input"""
-        # Check if Empire bridge is available
-        if hasattr(self, 'empire_bridge'):
-            # This would be called in async context for AI collaboration
-            return self.plan()  # Fallback to autonomous planning
-        return self.plan()
-
-# Usage example:
-async def main():
-    composer = EnhancedTrixelComposer()
-    await composer.start_collaborative_session()
-
-if __name__ == "__main__":
-    asyncio.run(main())
+# Integration helper for an external composer implementation.
+def attach_empire_bridge(composer):
+    """Attach Empire bridge to any composer object exposing perceive/act/plan/tool/canvas."""
+    composer.empire_bridge = EmpireBridge(composer)
+    return composer

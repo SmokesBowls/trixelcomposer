@@ -20,6 +20,10 @@ CANVAS_WIDTH = 16
 CANVAS_HEIGHT = 16
 ZW_SESSION_PATH = ".zw/trixel.session"
 
+OLLAMA_AVAILABLE = importlib.util.find_spec("ollama") is not None
+if OLLAMA_AVAILABLE:
+    import ollama
+
 class CreativePhase(Enum):
     PLANNING = "planning"
     ACTIVE_CREATION = "active_creation"
@@ -292,6 +296,8 @@ class TerminalTrixelComposer:
         self.memory = AutonomousCreativeMemory()
         self.creative_phase = CreativePhase.PLANNING
         self.session_id = f"terminal_{int(time.time())}"
+        self.intent_manager = ZWArtIntentManager()
+        self.ollama_model: Optional[str] = None
         self.snapshot_manager = SnapshotManager(Path(".zw/snapshots.json"))
         self.memory_path = Path(".zw/memory.json")
 
@@ -319,6 +325,8 @@ class TerminalTrixelComposer:
             self.phase_colors['active'] = self.intent_manager.palette_colors
             self.phase_colors['reflection'] = self.intent_manager.palette_colors
             self.phase_colors['style'] = self.intent_manager.palette_colors
+
+        self._configure_ollama_model()
 
     def _safe_input(self, prompt: str) -> str:
         if not sys.stdin.isatty():
