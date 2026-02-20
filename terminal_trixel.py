@@ -5,6 +5,7 @@
 import os
 import sys
 import asyncio
+import argparse
 import json
 import time
 import random
@@ -687,6 +688,72 @@ class TerminalTrixelComposer:
         # Final session summary
         await self.session_summary()
         
+    async def replay_experience_jsonl(
+        self,
+        jsonl_path: Path,
+        delay: float = 0.15,
+        clear_canvas: bool = True,
+        max_events: Optional[int] = None,
+    ):
+        """Replay stroke events from a JSONL log onto the canvas."""
+        path = Path(jsonl_path)
+        if not path.exists():
+            raise FileNotFoundError(f"Replay file not found: {path}")
+
+        if clear_canvas:
+            self.canvas = TerminalCanvas(width=CANVAS_WIDTH, height=CANVAS_HEIGHT)
+            print("🧼 Cleared canvas for replay.")
+
+        print(f"🎬 Replaying strokes from: {path}")
+        applied = 0
+        skipped = 0
+
+        with open(path, "r", encoding="utf-8") as f:
+            for line_no, line in enumerate(f, start=1):
+                if not line.strip():
+                    continue
+
+                try:
+                    payload = json.loads(line)
+                except json.JSONDecodeError:
+                    skipped += 1
+                    continue
+
+                action_data = payload.get("action", payload)
+                x = action_data.get("x")
+                y = action_data.get("y")
+                color = action_data.get("color")
+
+                if not (isinstance(x, int) and isinstance(y, int)):
+                    skipped += 1
+                    continue
+                if not (isinstance(color, (list, tuple)) and len(color) == 3):
+                    skipped += 1
+                    continue
+
+                color_tuple = tuple(int(c) for c in color)
+                self.canvas.set_pixel(x, y, color_tuple)
+                applied += 1
+
+                quality = payload.get("quality")
+                quality_text = f"{float(quality):.2f}" if isinstance(quality, (int, float)) else "n/a"
+                print(
+                    f"🎞️ Replay {applied}: line {line_no} -> ({x},{y}) color={color_tuple} quality={quality_text}"
+                )
+                self.canvas.display()
+
+                if delay > 0:
+                    await asyncio.sleep(delay)
+
+                if max_events is not None and applied >= max_events:
+                    break
+
+        stats = self.canvas.get_stats()
+        print(
+            f"✅ Replay complete: applied={applied}, skipped={skipped}, "
+            f"completion={stats['completion']:.1%}, colors={stats['colors_used']}"
+        )
+
     async def session_summary(self):
         """Display final session summary"""
         perception = self.perceive()
@@ -779,23 +846,37 @@ class TerminalTrixelComposer:
             except Exception as e:
                 print(f"⚠️ Could not load memory: {e}")
 
-async def main():
+async def main(
+    replay_jsonl: Optional[str] = None,
+    replay_delay: float = 0.15,
+    replay_limit: Optional[int] = None,
+    clear_replay_canvas: bool = True,
+):
     """Main entry point"""
     print("🎨 TRIXEL COMPOSER: AUTONOMOUS AI ARTIST")
     print("=" * 50)
     print("🚀 Initializing autonomous creative intelligence...")
-    
+
     composer = TerminalTrixelComposer()
-    
-    # Show initial empty canvas
+
+    # Show initial canvas
     composer.canvas.display()
-    
+
+    if replay_jsonl:
+        await composer.replay_experience_jsonl(
+            jsonl_path=Path(replay_jsonl),
+            delay=max(0.0, replay_delay),
+            clear_canvas=clear_replay_canvas,
+            max_events=replay_limit,
+        )
+        return
+
     print("\n⏳ Starting autonomous creation in 3 seconds...")
     await asyncio.sleep(3)
-    
+
     # Begin autonomous creation
     await composer.autonomous_create(30)
-    
+
     print("\n✨ Autonomous AI artist session complete!")
     print("🎯 Check .zw/sessions/ folder for saved session data")
 
@@ -863,8 +944,22 @@ def apply_png_patch():
 apply_png_patch()
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Terminal Trixel Composer")
+    parser.add_argument("--replay-jsonl", help="Replay strokes from a JSONL file")
+    parser.add_argument("--replay-delay", type=float, default=0.15, help="Delay between replayed strokes (seconds)")
+    parser.add_argument("--replay-limit", type=int, default=None, help="Optional max number of replay events")
+    parser.add_argument("--no-clear-replay-canvas", action="store_true", help="Do not clear the current canvas before replay")
+    args = parser.parse_args()
+
     try:
-        asyncio.run(main())
+        asyncio.run(
+            main(
+                replay_jsonl=args.replay_jsonl,
+                replay_delay=args.replay_delay,
+                replay_limit=args.replay_limit,
+                clear_replay_canvas=not args.no_clear_replay_canvas,
+            )
+        )
     except KeyboardInterrupt:
         print("\n\n🛑 Session interrupted by user")
     except Exception as e:
