@@ -3,7 +3,7 @@
 
 import os
 import asyncio
-import aiohttp
+import importlib.util
 import json
 import time
 from pathlib import Path
@@ -11,9 +11,23 @@ from dataclasses import dataclass, asdict
 from typing import Dict, List, Set, Tuple, Optional
 from enum import Enum
 
-from PyQt5 import QtWidgets, QtGui, QtCore
-from PIL import Image, ImageDraw
-import numpy as np
+AIOHTTP_AVAILABLE = importlib.util.find_spec("aiohttp") is not None
+if AIOHTTP_AVAILABLE:
+    import aiohttp
+
+PYQT5_AVAILABLE = importlib.util.find_spec("PyQt5") is not None
+if PYQT5_AVAILABLE:
+    from PyQt5 import QtWidgets, QtGui, QtCore
+
+PIL_AVAILABLE = importlib.util.find_spec("PIL") is not None
+if PIL_AVAILABLE:
+    from PIL import Image, ImageDraw
+
+NUMPY_AVAILABLE = importlib.util.find_spec("numpy") is not None
+if NUMPY_AVAILABLE:
+    import numpy as np
+else:
+    np = None
 
 # --- Enhanced Configuration ---
 CANVAS_WIDTH = 16
@@ -119,51 +133,52 @@ class AutonomousCreativeMemory:
         if prefs['usage_count'] > 5:
             prefs['mastery_level'] = min(prefs['success_rate'] * (prefs['usage_count'] / 20), 1.0)
 
-class OptimizedTrixelCanvas(QtWidgets.QWidget):
-    """Performance-optimized canvas with dirty region tracking"""
-    
-    def __init__(self, composer):
-        super().__init__()
-        self.composer = composer
-        self.dirty_regions: Set[Tuple[int, int]] = set()
-        self.background_buffer = None
-        self.last_full_render = 0
-        self.setFixedSize(CANVAS_WIDTH * PIXEL_SIZE, CANVAS_HEIGHT * PIXEL_SIZE)
-        
-    def mark_dirty(self, x: int, y: int):
-        """Mark a pixel region as needing redraw"""
-        self.dirty_regions.add((x, y))
-        
-    def paintEvent(self, event):
-        """Optimized paint event with dirty region tracking"""
-        qp = QtGui.QPainter(self)
-        current_time = time.time()
-        
-        # Full redraw every few seconds or if too many dirty regions
-        if (current_time - self.last_full_render > 5.0 or 
-            len(self.dirty_regions) > CANVAS_WIDTH * CANVAS_HEIGHT * 0.3):
-            self._full_redraw(qp)
-            self.last_full_render = current_time
+if PYQT5_AVAILABLE:
+    class OptimizedTrixelCanvas(QtWidgets.QWidget):
+        """Performance-optimized canvas with dirty region tracking"""
+
+        def __init__(self, composer):
+            super().__init__()
+            self.composer = composer
+            self.dirty_regions: Set[Tuple[int, int]] = set()
+            self.background_buffer = None
+            self.last_full_render = 0
+            self.setFixedSize(CANVAS_WIDTH * PIXEL_SIZE, CANVAS_HEIGHT * PIXEL_SIZE)
+
+        def mark_dirty(self, x: int, y: int):
+            """Mark a pixel region as needing redraw"""
+            self.dirty_regions.add((x, y))
+
+        def paintEvent(self, event):
+            """Optimized paint event with dirty region tracking"""
+            qp = QtGui.QPainter(self)
+            current_time = time.time()
+
+            # Full redraw every few seconds or if too many dirty regions
+            if (current_time - self.last_full_render > 5.0 or
+                len(self.dirty_regions) > CANVAS_WIDTH * CANVAS_HEIGHT * 0.3):
+                self._full_redraw(qp)
+                self.last_full_render = current_time
+                self.dirty_regions.clear()
+            else:
+                self._partial_redraw(qp)
+
+        def _full_redraw(self, qp):
+            """Complete canvas redraw"""
+            for y in range(CANVAS_HEIGHT):
+                for x in range(CANVAS_WIDTH):
+                    color = QtGui.QColor(*self.composer.canvas[y, x])
+                    qp.fillRect(x * PIXEL_SIZE, y * PIXEL_SIZE,
+                              PIXEL_SIZE, PIXEL_SIZE, color)
+
+        def _partial_redraw(self, qp):
+            """Redraw only dirty regions"""
+            for x, y in self.dirty_regions:
+                if 0 <= x < CANVAS_WIDTH and 0 <= y < CANVAS_HEIGHT:
+                    color = QtGui.QColor(*self.composer.canvas[y, x])
+                    qp.fillRect(x * PIXEL_SIZE, y * PIXEL_SIZE,
+                              PIXEL_SIZE, PIXEL_SIZE, color)
             self.dirty_regions.clear()
-        else:
-            self._partial_redraw(qp)
-            
-    def _full_redraw(self, qp):
-        """Complete canvas redraw"""
-        for y in range(CANVAS_HEIGHT):
-            for x in range(CANVAS_WIDTH):
-                color = QtGui.QColor(*self.composer.canvas[y, x])
-                qp.fillRect(x * PIXEL_SIZE, y * PIXEL_SIZE, 
-                          PIXEL_SIZE, PIXEL_SIZE, color)
-                
-    def _partial_redraw(self, qp):
-        """Redraw only dirty regions"""
-        for x, y in self.dirty_regions:
-            if 0 <= x < CANVAS_WIDTH and 0 <= y < CANVAS_HEIGHT:
-                color = QtGui.QColor(*self.composer.canvas[y, x])
-                qp.fillRect(x * PIXEL_SIZE, y * PIXEL_SIZE, 
-                          PIXEL_SIZE, PIXEL_SIZE, color)
-        self.dirty_regions.clear()
 
 class RealTimeCreativeFeedback:
     """Real-time AI feedback system with adaptive response times"""
@@ -231,6 +246,9 @@ class EnhancedTrixelComposer:
     """Advanced autonomous AI artist with memory, learning, and optimization"""
     
     def __init__(self):
+        if not NUMPY_AVAILABLE:
+            raise RuntimeError("EnhancedTrixelComposer requires numpy. Install numpy and retry.")
+
         self.canvas = np.zeros((CANVAS_HEIGHT, CANVAS_WIDTH, 3), dtype=np.uint8)
         self.tool = 'brush'
         self.color = (255, 255, 255)
@@ -507,61 +525,66 @@ class EnhancedTrixelComposer:
         }
 
 # Enhanced UI Integration
-class EnhancedComposerUI(QtWidgets.QWidget):
-    def __init__(self, composer):
-        super().__init__()
-        self.setWindowTitle("Trixel Composer - Autonomous AI Artist")
-        self.composer = composer
-        self.canvas_widget = OptimizedTrixelCanvas(composer)
-        
-        # Layout
-        layout = QtWidgets.QVBoxLayout()
-        
-        # Canvas
-        layout.addWidget(self.canvas_widget)
-        
-        # Control panel
-        controls = QtWidgets.QHBoxLayout()
-        
-        # Autonomous creation button
-        auto_button = QtWidgets.QPushButton("Start Autonomous Creation")
-        auto_button.clicked.connect(self.start_autonomous_creation)
-        controls.addWidget(auto_button)
-        
-        # Phase indicator
-        self.phase_label = QtWidgets.QLabel("Phase: Planning")
-        controls.addWidget(self.phase_label)
-        
-        layout.addLayout(controls)
-        self.setLayout(layout)
-        
-        # Timer for UI updates
-        self.timer = QtCore.QTimer()
-        self.timer.timeout.connect(self.update_ui)
-        self.timer.start(100)  # Update every 100ms
-        
-    def start_autonomous_creation(self):
-        """Start autonomous creation in separate thread"""
-        import threading
-        
-        def run_creation():
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(self.composer.autonomous_create(20))
-            loop.close()
-        
-        thread = threading.Thread(target=run_creation)
-        thread.daemon = True
-        thread.start()
-    
-    def update_ui(self):
-        """Update UI elements"""
-        self.phase_label.setText(f"Phase: {self.composer.creative_phase.value}")
-        self.canvas_widget.update()
+if PYQT5_AVAILABLE:
+    class EnhancedComposerUI(QtWidgets.QWidget):
+        def __init__(self, composer):
+            super().__init__()
+            self.setWindowTitle("Trixel Composer - Autonomous AI Artist")
+            self.composer = composer
+            self.canvas_widget = OptimizedTrixelCanvas(composer)
+
+            # Layout
+            layout = QtWidgets.QVBoxLayout()
+
+            # Canvas
+            layout.addWidget(self.canvas_widget)
+
+            # Control panel
+            controls = QtWidgets.QHBoxLayout()
+
+            # Autonomous creation button
+            auto_button = QtWidgets.QPushButton("Start Autonomous Creation")
+            auto_button.clicked.connect(self.start_autonomous_creation)
+            controls.addWidget(auto_button)
+
+            # Phase indicator
+            self.phase_label = QtWidgets.QLabel("Phase: Planning")
+            controls.addWidget(self.phase_label)
+
+            layout.addLayout(controls)
+            self.setLayout(layout)
+
+            # Timer for UI updates
+            self.timer = QtCore.QTimer()
+            self.timer.timeout.connect(self.update_ui)
+            self.timer.start(100)  # Update every 100ms
+
+        def start_autonomous_creation(self):
+            """Start autonomous creation in separate thread"""
+            import threading
+
+            def run_creation():
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(self.composer.autonomous_create(20))
+                loop.close()
+
+            thread = threading.Thread(target=run_creation)
+            thread.daemon = True
+            thread.start()
+
+        def update_ui(self):
+            """Update UI elements"""
+            self.phase_label.setText(f"Phase: {self.composer.creative_phase.value}")
+            self.canvas_widget.update()
 
 # Launch Enhanced System
 if __name__ == '__main__':
     import sys
+
+    if not PYQT5_AVAILABLE:
+        raise RuntimeError("PyQt5 is required to launch the enhanced GUI. Install PyQt5 and retry.")
+
     app = QtWidgets.QApplication(sys.argv)
     composer = EnhancedTrixelComposer()
     ui = EnhancedComposerUI(composer)
